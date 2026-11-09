@@ -1,0 +1,11 @@
+using System.Diagnostics;
+using System.Text.Json;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+namespace PcHealthMonitor.Worker;
+public sealed class MonitorOptions { public int IntervalSeconds{get;set;}=60; public string OutputDirectory{get;set;}=@"C:\ProgramData\PcHealthMonitor\logs"; public string[] Drives{get;set;}=["C"]; public double CpuWarningPercent{get;set;}=85; public double MemoryWarningPercent{get;set;}=85; }
+public sealed class HealthWorker(IOptions<MonitorOptions> options,ILogger<HealthWorker> logger):BackgroundService {
+ private readonly MonitorOptions s=options.Value;
+ protected override async Task ExecuteAsync(CancellationToken ct){Directory.CreateDirectory(s.OutputDirectory); using var cpu=new PerformanceCounter("Processor","% Processor Time","_Total"); using var mem=new PerformanceCounter("Memory","% Committed Bytes In Use"); cpu.NextValue(); while(!ct.IsCancellationRequested){try{await Task.Delay(1000,ct);var cpuPct=Math.Clamp(cpu.NextValue(),0,100);var memPct=Math.Clamp(mem.NextValue(),0,100);var disks=s.Drives.Select(d=>{var drive=new DriveInfo(d.EndsWith(":")?d:d+":");return new{drive.Name,FreeGb=Math.Round(drive.AvailableFreeSpace/1024d/1024/1024,2),TotalGb=Math.Round(drive.TotalSize/1024d/1024/1024,2),FreePercent=Math.Round(100d*drive.AvailableFreeSpace/drive.TotalSize,2)};}).ToArray();var record=new{TimestampUtc=DateTime.UtcNow,CpuPercent=Math.Round(cpuPct,2),MemoryCommittedPercent=Math.Round(memPct,2),Disks=disks};var path=Path.Combine(s.OutputDirectory,"health-"+DateTime.UtcNow.ToString("yyyyMMdd")+".jsonl");await File.AppendAllTextAsync(path,JsonSerializer.Serialize(record)+Environment.NewLine,ct);if(cpuPct>=s.CpuWarningPercent||memPct>=s.MemoryWarningPercent)logger.LogWarning("High usage CPU {Cpu}% RAM {Ram}%",cpuPct,memPct);else logger.LogInformation("Health sample CPU {Cpu}% RAM {Ram}%",cpuPct,memPct);}catch(OperationCanceledException)when(ct.IsCancellationRequested){break;}catch(Exception ex){logger.LogError(ex,"Health sampling failed");}}}
+}
